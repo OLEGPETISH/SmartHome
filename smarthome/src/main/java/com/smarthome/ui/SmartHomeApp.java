@@ -2,17 +2,26 @@ package com.smarthome.ui;
 
 import com.smarthome.abstractfactory.SmartHomeFactory;
 import com.smarthome.abstractfactory.SmartHomeFactoryProvider;
+import com.smarthome.adapter.DeviceProtocol;
+import com.smarthome.adapter.ProtocolAdapterFactory;
 import com.smarthome.builder.AutomationScenario;
 import com.smarthome.builder.ScenarioDirector;
+import com.smarthome.composite.DeviceComponent;
+import com.smarthome.composite.DeviceHierarchyBuilder;
+import com.smarthome.decorator.Decorators;
+import com.smarthome.facade.SmartHomeFacade;
 import com.smarthome.model.*;
 import com.smarthome.prototype.ConfigurationRegistry;
 import com.smarthome.prototype.RoomConfiguration;
+import com.smarthome.proxy.ProxyFactory;
+import com.smarthome.proxy.SecureDeviceProxy;
 import com.smarthome.singleton.DeviceManager;
 
 import javax.swing.*;
 import javax.swing.border.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.*;
 
@@ -34,6 +43,10 @@ public class SmartHomeApp extends JFrame {
 
     private final DeviceManager dm = DeviceManager.getInstance();
     private ConfigurationRegistry registry;
+    // ── LAB 2: новые поля ─────────────────────────────────────────────────────
+    private SmartHomeFacade facade;
+    private DeviceComponent homeTree;
+    // ─────────────────────────────────────────────────────────────────────────
     private JPanel devicesPanel;
     private JLabel statsLabel;
     private JTextArea logArea;
@@ -71,7 +84,7 @@ public class SmartHomeApp extends JFrame {
 
         // Register all devices
         for (Device d : new Device[]{livingLamp, livingAC, livingTV, livingCam,
-                                     bedLamp, bedThermo, bedAlarm, kitchenLamp, kitchenCam}) {
+                bedLamp, bedThermo, bedAlarm, kitchenLamp, kitchenCam}) {
             dm.addDevice(d);
         }
 
@@ -100,6 +113,51 @@ public class SmartHomeApp extends JFrame {
                 .setLampSettings(20, "warm")
                 .setACSettings(23.0, 1);
         registry.register("movie_mode", movieMode);
+
+        // ── LAB 2: Structural Patterns ─────────────────────────────────────
+
+        // FACADE: единая точка доступа ко всей подсистеме
+        facade = new SmartHomeFacade(registry);
+
+        // ADAPTER: подключаем устройства через разные протоколы
+        DeviceProtocol z = ProtocolAdapterFactory.create("zigbee",    "0xABCD");
+        DeviceProtocol w = ProtocolAdapterFactory.create("wifi",      "192.168.1.42");
+        DeviceProtocol b = ProtocolAdapterFactory.create("bluetooth", "AA:BB:CC:DD");
+        z.connect(); w.connect(); b.connect();
+        z.sendCommand("TURN_ON");
+        dm.logEvent("Adapter: Zigbee/WiFi/Bluetooth connected");
+
+        // DECORATOR: лампа с расписанием + мониторингом энергии
+        Device decoratedLamp = Decorators.scheduledWithEnergy(
+                livingLamp, LocalTime.of(7, 0), LocalTime.of(23, 0), 60.0);
+        // DECORATOR: кондиционер с авторегулировкой температуры
+        Device decoratedAC  = Decorators.autoClimate(livingAC, 26.5);
+        // DECORATOR: камера с оповещениями о движении
+        Device decoratedCam = Decorators.motionAlert(kitchenCam);
+        dm.logEvent("Decorator: " + Decorators.decoratorChain(decoratedLamp));
+
+        // COMPOSITE: строим дерево всего дома
+        homeTree = DeviceHierarchyBuilder.buildHome("Sarah's Home",
+                List.of(
+                        DeviceHierarchyBuilder.buildFloor("1st Floor", List.of(
+                                DeviceHierarchyBuilder.buildRoom("Living Room", dm.getDevicesByRoom("Living Room")),
+                                DeviceHierarchyBuilder.buildRoom("Kitchen",     dm.getDevicesByRoom("Kitchen"))
+                        )),
+                        DeviceHierarchyBuilder.buildFloor("2nd Floor", List.of(
+                                DeviceHierarchyBuilder.buildRoom("Bedroom", dm.getDevicesByRoom("Bedroom"))
+                        ))
+                )
+        );
+        System.out.println("\n=== HOME TREE (Composite) ===");
+        homeTree.printTree("");
+        dm.logEvent("Composite: tree built — " + homeTree.getDeviceCount() + " devices");
+
+        // PROXY: защищённый доступ с проверкой ролей
+        SecureDeviceProxy adminProxy = ProxyFactory.asAdmin(bedAlarm, "Sarah");
+        SecureDeviceProxy guestProxy = ProxyFactory.asGuest(bedAlarm, "Visitor");
+        adminProxy.turnOn();  // разрешено — ADMIN
+        guestProxy.turnOn();  // отклонено — ALARM только для ADMIN
+        dm.logEvent("Proxy: access control demo complete");
     }
 
     // ── Build UI ──────────────────────────────────────────────────────────────
@@ -134,8 +192,9 @@ public class SmartHomeApp extends JFrame {
         header.setBorder(new EmptyBorder(0, 20, 20, 20));
         header.setAlignmentX(LEFT_ALIGNMENT);
 
-        JLabel homeIcon = new JLabel("🏠");
-        homeIcon.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 32));
+        JLabel homeIcon = new JLabel("Home");
+        homeIcon.setFont(new Font("Arial", Font.BOLD, 20));
+        homeIcon.setForeground(ACCENT_CYAN);
         homeIcon.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel titleLabel = new JLabel("SmartHome");
@@ -165,14 +224,14 @@ public class SmartHomeApp extends JFrame {
         roomsTitle.setAlignmentX(LEFT_ALIGNMENT);
         sidebar.add(roomsTitle);
 
-        addRoomButton(sidebar, "All Rooms", "🏠");
+        addRoomButton(sidebar, "All Rooms", "[All]");
         for (String room : dm.getRooms()) {
             String icon = switch (room) {
-                case "Living Room" -> "🛋️";
-                case "Bedroom"     -> "🛏️";
-                case "Kitchen"     -> "🍳";
-                case "Bathroom"    -> "🚿";
-                default            -> "📍";
+                case "Living Room" -> "[LR]";
+                case "Bedroom"     -> "[BR]";
+                case "Kitchen"     -> "[KT]";
+                case "Bathroom"    -> "[BT]";
+                default            -> "[?]";
             };
             addRoomButton(sidebar, room, icon);
         }
@@ -188,10 +247,28 @@ public class SmartHomeApp extends JFrame {
         scenLabel.setAlignmentX(LEFT_ALIGNMENT);
         sidebar.add(scenLabel);
 
-        addScenarioButton(sidebar, "🌙  Night Mode",   "night_mode");
-        addScenarioButton(sidebar, "☀️  Morning Mode", "morning_mode");
-        addScenarioButton(sidebar, "🎬  Movie Mode",   "movie_mode");
-        addScenarioButton(sidebar, "🚪  Away Mode",    null);
+        addScenarioButton(sidebar, "Night Mode",   "night_mode");
+        addScenarioButton(sidebar, "Morning Mode", "morning_mode");
+        addScenarioButton(sidebar, "Movie Mode",   "movie_mode");
+        addScenarioButton(sidebar, "Away Mode",    null);
+
+        // ── LAB 2: Structural patterns section ───────────────────────────────
+        sidebar.add(Box.createVerticalStrut(10));
+        sidebar.add(createDivider());
+
+        JLabel lab2Label = new JLabel("LAB 2: STRUCTURAL");
+        lab2Label.setFont(new Font("Arial", Font.BOLD, 10));
+        lab2Label.setForeground(new Color(0xFF6B9D));
+        lab2Label.setBorder(new EmptyBorder(10, 20, 8, 20));
+        lab2Label.setAlignmentX(LEFT_ALIGNMENT);
+        sidebar.add(lab2Label);
+
+        addStructuralButton(sidebar, "Test Adapter",  "adapter");
+        addStructuralButton(sidebar, "Use Facade",    "facade");
+        addStructuralButton(sidebar, "Add Decorator", "decorator");
+        addStructuralButton(sidebar, "Show Tree",     "composite");
+        addStructuralButton(sidebar, "Test Proxy",    "proxy");
+        // ─────────────────────────────────────────────────────────────────────
 
         sidebar.add(Box.createVerticalGlue());
 
@@ -217,7 +294,6 @@ public class SmartHomeApp extends JFrame {
             selectedRoom = room;
             roomLabel.setText(room);
             refreshDevices();
-            // Recolor
             for (Component c : parent.getComponents()) {
                 if (c instanceof JButton b) {
                     String label = b.getText().trim();
@@ -236,9 +312,82 @@ public class SmartHomeApp extends JFrame {
         parent.add(btn);
     }
 
+    // ── LAB 2: методы для структурных паттернов ───────────────────────────────
+
+    private void addStructuralButton(JPanel parent, String label, String key) {
+        JButton btn = createSidebarButton(label);
+        btn.setForeground(new Color(0xFF6B9D));
+        btn.addActionListener(e -> runStructuralDemo(key));
+        parent.add(btn);
+    }
+
+    private void runStructuralDemo(String key) {
+        switch (key) {
+            case "adapter" -> {
+                DeviceProtocol p1 = ProtocolAdapterFactory.create("zigbee",    "0xDEAD");
+                DeviceProtocol p2 = ProtocolAdapterFactory.create("wifi",      "10.0.0.5");
+                DeviceProtocol p3 = ProtocolAdapterFactory.create("bluetooth", "FF:EE:DD:CC");
+                p1.connect(); p2.connect(); p3.connect();
+                p1.sendCommand("STATUS");
+                p2.sendCommand("STATUS");
+                p3.sendCommand("STATUS");
+                dm.logEvent("[Adapter] Demo: 3 protocols tested");
+                showToast("Adapter demo:\n"
+                        + p1.getProtocolName() + " — " + p1.readStatus() + "\n"
+                        + p2.getProtocolName() + " — connected\n"
+                        + p3.getProtocolName() + " — connected");
+            }
+            case "facade" -> {
+                String room = selectedRoom.equals("All Rooms") ? "Living Room" : selectedRoom;
+                facade.turnOnRoom(room);
+                dm.logEvent("[Facade] turnOnRoom via Facade: " + room);
+                showToast("Facade: включены все устройства в комнате\n" + room);
+                refreshDevices();
+            }
+            case "decorator" -> {
+                List<Device> all = dm.getAllDevices();
+                if (!all.isEmpty()) {
+                    Device d = all.get(0);
+                    Device dec = Decorators.scheduledWithEnergy(
+                            d, LocalTime.of(8, 0), LocalTime.of(22, 0), 75.0);
+                    dm.logEvent("[Decorator] " + Decorators.decoratorChain(dec));
+                    showToast("Decorator chain:\n" + Decorators.decoratorChain(dec));
+                }
+            }
+            case "composite" -> {
+                homeTree.printTree("");
+                dm.logEvent("[Composite] Tree: " + homeTree.getDeviceCount() + " devices");
+                showToast("Composite Tree:\n"
+                        + homeTree.getName() + "\n"
+                        + "Всего устройств: " + homeTree.getDeviceCount() + "\n"
+                        + "Активных: "        + homeTree.getActiveCount()
+                        + "\n\n(подробнее в консоли)");
+            }
+            case "proxy" -> {
+                List<Device> alarms = dm.getDevicesByType(DeviceType.ALARM);
+                if (!alarms.isEmpty()) {
+                    Device alarm = alarms.get(0);
+                    ProxyFactory.asAdmin(alarm, "Sarah").turnOn();
+                    ProxyFactory.asGuest(alarm, "Visitor").turnOn();
+                    dm.logEvent("[Proxy] Admin: OK | Guest: DENIED");
+                    showToast("Proxy demo:\n"
+                            + "ADMIN 'Sarah'   -> ALLOWED\n"
+                            + "GUEST 'Visitor' -> DENIED\n\n"
+                            + "(подробнее в Activity Log)");
+                } else {
+                    showToast("Нет устройства Alarm для демо Proxy");
+                }
+                refreshDevices();
+            }
+        }
+        refreshLog();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     private JButton createSidebarButton(String text) {
         JButton btn = new JButton(text);
-        btn.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 13));
+        btn.setFont(new Font("Arial", Font.PLAIN, 13));
         btn.setForeground(TEXT_PRIMARY);
         btn.setBackground(BG_CARD);
         btn.setBorder(new EmptyBorder(10, 20, 10, 20));
@@ -249,12 +398,8 @@ public class SmartHomeApp extends JFrame {
         btn.setFocusPainted(false);
         btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         btn.addMouseListener(new MouseAdapter() {
-            @Override public void mouseEntered(MouseEvent e) {
-                btn.setBackground(BG_CARD2);
-            }
-            @Override public void mouseExited(MouseEvent e) {
-                btn.setBackground(BG_CARD);
-            }
+            @Override public void mouseEntered(MouseEvent e) { btn.setBackground(BG_CARD2); }
+            @Override public void mouseExited(MouseEvent e)  { btn.setBackground(BG_CARD); }
         });
         return btn;
     }
@@ -324,8 +469,17 @@ public class SmartHomeApp extends JFrame {
         bar.setBackground(BG_DARK);
         bar.setBorder(new EmptyBorder(8, 0, 0, 0));
 
-        String[] patterns = {"Factory Method", "Abstract Factory", "Singleton", "Builder", "Prototype"};
-        Color[] colors = {ACCENT_CYAN, ACCENT_BLUE, ACCENT_PURPLE, SUCCESS, WARNING};
+        // ── LAB 2: обновлённый список — все 10 паттернов ─────────────────────
+        String[] patterns = {
+                "Factory Method", "Abstract Factory", "Singleton", "Builder", "Prototype",
+                "Adapter", "Facade", "Decorator", "Composite", "Proxy"
+        };
+        Color[] colors = {
+                ACCENT_CYAN, ACCENT_BLUE, ACCENT_PURPLE, SUCCESS, WARNING,
+                new Color(0xFF6B9D), new Color(0x7ED321),
+                new Color(0xF5A623), new Color(0x9B59B6), new Color(0x1ABC9C)
+        };
+        // ─────────────────────────────────────────────────────────────────────
         for (int i = 0; i < patterns.length; i++) {
             JLabel tag = new JLabel(patterns[i]);
             tag.setFont(new Font("Arial", Font.BOLD, 10));
@@ -427,10 +581,9 @@ public class SmartHomeApp extends JFrame {
 
         Color accent = getAccentForType(device.getType());
         JLabel iconLabel = new JLabel(device.getType().getIcon() + "  " + device.getType().getLabel());
-        iconLabel.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 13));
+        iconLabel.setFont(new Font("Arial", Font.PLAIN, 13));
         iconLabel.setForeground(device.isOn() ? accent : TEXT_MUTED);
 
-        // Toggle switch (custom JToggleButton)
         JToggleButton toggle = new JToggleButton(device.isOn() ? "ON" : "OFF");
         toggle.setSelected(device.isOn());
         styleToggle(toggle, accent);
@@ -458,7 +611,7 @@ public class SmartHomeApp extends JFrame {
 
         // Status
         JLabel statusLabel = new JLabel(device.getStatus());
-        statusLabel.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 11));
+        statusLabel.setFont(new Font("Arial", Font.PLAIN, 11));
         statusLabel.setForeground(device.isOn() ? accent : TEXT_MUTED);
 
         JPanel centerPanel = new JPanel();
@@ -473,7 +626,6 @@ public class SmartHomeApp extends JFrame {
         card.add(topRow, BorderLayout.NORTH);
         card.add(centerPanel, BorderLayout.CENTER);
 
-        // Hover
         card.addMouseListener(new MouseAdapter() {
             @Override public void mouseEntered(MouseEvent e) { card.repaint(); }
             @Override public void mouseExited(MouseEvent e)  { card.repaint(); }
@@ -484,13 +636,13 @@ public class SmartHomeApp extends JFrame {
 
     private Color getAccentForType(DeviceType type) {
         return switch (type) {
-            case LAMP              -> WARNING;
-            case THERMOSTAT        -> new Color(0xFF7A7A);
-            case AIR_CONDITIONER   -> ACCENT_CYAN;
-            case CAMERA            -> ACCENT_PURPLE;
-            case ALARM             -> DANGER;
-            case TV                -> ACCENT_BLUE;
-            default                -> SUCCESS;
+            case LAMP            -> WARNING;
+            case THERMOSTAT      -> new Color(0xFF7A7A);
+            case AIR_CONDITIONER -> ACCENT_CYAN;
+            case CAMERA          -> ACCENT_PURPLE;
+            case ALARM           -> DANGER;
+            case TV              -> ACCENT_BLUE;
+            default              -> SUCCESS;
         };
     }
 
@@ -508,7 +660,6 @@ public class SmartHomeApp extends JFrame {
     private void runScenario(String configKey, String label) {
         String room = selectedRoom.equals("All Rooms") ? "Living Room" : selectedRoom;
 
-        // Prototype: clone config and apply settings to devices
         if (configKey != null) {
             RoomConfiguration config = registry.getCloneForRoom(configKey, room);
             List<Device> targets = selectedRoom.equals("All Rooms")
@@ -519,10 +670,6 @@ public class SmartHomeApp extends JFrame {
             }
         }
 
-        // Builder + Director:
-        // Клиент создаёт Builder, передаёт его Director.
-        // Director сам знает порядок шагов построения каждого сценария —
-        // клиент (UI) не управляет деталями, просто просит нужный тип.
         AutomationScenario.Builder builder = new AutomationScenario.Builder(label);
         ScenarioDirector director = new ScenarioDirector(builder);
 
@@ -556,12 +703,12 @@ public class SmartHomeApp extends JFrame {
         String[] typeOptions = Arrays.stream(DeviceType.values())
                 .map(t -> t.getIcon() + " " + t.getLabel()).toArray(String[]::new);
         String[] brandOptions = SmartHomeFactoryProvider.availableBrands();
-        String[] roomOptions = dm.getRooms().toArray(String[]::new);
+        String[] roomOptions  = dm.getRooms().toArray(String[]::new);
 
         JTextField nameField = styledTextField();
-        JComboBox<String> typeCombo = styledCombo(typeOptions);
+        JComboBox<String> typeCombo  = styledCombo(typeOptions);
         JComboBox<String> brandCombo = styledCombo(brandOptions);
-        JComboBox<String> roomCombo = styledCombo(roomOptions);
+        JComboBox<String> roomCombo  = styledCombo(roomOptions);
 
         form.add(styledFormLabel("Device Name:")); form.add(nameField);
         form.add(styledFormLabel("Type:"));        form.add(typeCombo);
@@ -573,14 +720,13 @@ public class SmartHomeApp extends JFrame {
             String name  = nameField.getText().trim();
             String brand = brandOptions[brandCombo.getSelectedIndex()];
             String room  = roomOptions[roomCombo.getSelectedIndex()];
-            int    typeIdx = typeCombo.getSelectedIndex();
+            int typeIdx  = typeCombo.getSelectedIndex();
             DeviceType type = DeviceType.values()[typeIdx];
 
             if (name.isEmpty()) { showToast("Enter device name"); return; }
 
             SmartHomeFactory factory = SmartHomeFactoryProvider.getFactory(brand);
 
-            // Factory Method usage
             Device newDevice = switch (type) {
                 case LAMP            -> factory.createLamp(name, room);
                 case THERMOSTAT      -> factory.createThermostat(name, room);
@@ -594,7 +740,7 @@ public class SmartHomeApp extends JFrame {
             dm.addDevice(newDevice);
             dialog.dispose();
             refreshDevices();
-            showToast("✅ Added " + name + " (" + brand + ") to " + room);
+            showToast("Added " + name + " (" + brand + ") to " + room);
         });
 
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -620,8 +766,10 @@ public class SmartHomeApp extends JFrame {
         btn.setFocusPainted(false);
         btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         btn.addMouseListener(new MouseAdapter() {
-            @Override public void mouseEntered(MouseEvent e) { btn.setBackground(new Color(fg.getRed(), fg.getGreen(), fg.getBlue(), 40)); }
-            @Override public void mouseExited(MouseEvent e)  { btn.setBackground(bg); }
+            @Override public void mouseEntered(MouseEvent e) {
+                btn.setBackground(new Color(fg.getRed(), fg.getGreen(), fg.getBlue(), 40));
+            }
+            @Override public void mouseExited(MouseEvent e) { btn.setBackground(bg); }
         });
         return btn;
     }
@@ -647,7 +795,7 @@ public class SmartHomeApp extends JFrame {
 
     private <T> JComboBox<T> styledCombo(T[] items) {
         JComboBox<T> c = new JComboBox<>(items);
-        c.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 12));
+        c.setFont(new Font("Arial", Font.PLAIN, 12));
         c.setForeground(TEXT_PRIMARY);
         c.setBackground(BG_DARK);
         c.setBorder(BorderFactory.createLineBorder(BG_CARD2));
@@ -665,7 +813,8 @@ public class SmartHomeApp extends JFrame {
 
     private void updateStats() {
         if (statsLabel != null) {
-            statsLabel.setText(String.format("<html><span style='color:#8892B0'>%d devices · %d active</span></html>",
+            statsLabel.setText(String.format(
+                    "<html><span style='color:#8892B0'>%d devices · %d active</span></html>",
                     dm.getTotalDevices(), dm.getActiveCount()));
         }
     }
@@ -697,23 +846,21 @@ public class SmartHomeApp extends JFrame {
     // ── Main ──────────────────────────────────────────────────────────────────
 
     public static void main(String[] args) {
-        // Look and feel
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception ignored) {}
 
-        // Dark UI defaults
-        UIManager.put("Panel.background", BG_DARK);
-        UIManager.put("OptionPane.background", BG_CARD);
-        UIManager.put("OptionPane.messageForeground", TEXT_PRIMARY);
-        UIManager.put("Button.background", BG_CARD);
-        UIManager.put("Button.foreground", TEXT_PRIMARY);
-        UIManager.put("ComboBox.background", BG_DARK);
-        UIManager.put("ComboBox.foreground", TEXT_PRIMARY);
-        UIManager.put("TextField.background", BG_DARK);
-        UIManager.put("TextField.foreground", TEXT_PRIMARY);
-        UIManager.put("ScrollBar.thumb", BG_CARD2);
-        UIManager.put("ScrollBar.track", BG_CARD);
+        UIManager.put("Panel.background",              BG_DARK);
+        UIManager.put("OptionPane.background",         BG_CARD);
+        UIManager.put("OptionPane.messageForeground",  TEXT_PRIMARY);
+        UIManager.put("Button.background",             BG_CARD);
+        UIManager.put("Button.foreground",             TEXT_PRIMARY);
+        UIManager.put("ComboBox.background",           BG_DARK);
+        UIManager.put("ComboBox.foreground",           TEXT_PRIMARY);
+        UIManager.put("TextField.background",          BG_DARK);
+        UIManager.put("TextField.foreground",          TEXT_PRIMARY);
+        UIManager.put("ScrollBar.thumb",               BG_CARD2);
+        UIManager.put("ScrollBar.track",               BG_CARD);
 
         SwingUtilities.invokeLater(() -> {
             SmartHomeApp app = new SmartHomeApp();
