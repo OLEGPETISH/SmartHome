@@ -2,9 +2,6 @@ package com.smarthome.model;
 
 import java.util.UUID;
 
-/**
- * Abstract base implementation for all devices.
- */
 public abstract class AbstractDevice implements Device {
     protected final String id;
     protected String name;
@@ -35,7 +32,14 @@ public abstract class AbstractDevice implements Device {
     @Override public void applySettings(DeviceSettings settings) { this.settings = settings.clone(); }
 
     public String getBrand() { return brand; }
-    public void setRoom(String room) { this.room = room; }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public void setRoom(String room) {
+        this.room = room;
+    }
 
     @Override
     public String toString() {
